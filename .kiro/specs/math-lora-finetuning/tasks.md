@@ -43,13 +43,13 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - Determinism guarantee: pure function, no global state
     - _Requirements: 1.3_
 
-  - [~] 2.2 Write property test for VRAM estimation
+  - [-] 2.2 Write property test for VRAM estimation
     - **Property 1: VRAM estimation is deterministic and monotonic**
     - **Validates: Requirements 1.3**
     - Verify determinism, monotonicity in `param_count_b` and `sequence_length`, and monotone non-increase across `fp16 -> bf16 -> int8 -> nf4`; verify exposed coefficients reconstruct the estimate exactly
     - _Requirements: 1.3_
 
-  - [~] 2.3 Implement candidate eligibility, feasibility, and scoring
+  - [-] 2.3 Implement candidate eligibility, feasibility, and scoring
     - Eligibility check: mark candidate ineligible and record `missing_fields` if any field from Req 1.1 / 1.8 is absent
     - Feasibility flag and `vram_shortfall_gb` computation rounded to one decimal place
     - Scoring function `score = w_gsm * normalize(gsm8k) + w_math * normalize(math) + w_params * normalize(params_b) + w_license * license_permissiveness` with weights summing to 1.0; lexicographic tie-breaker on `model_id`
@@ -88,12 +88,12 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - When `vram_per_gpu_gb < 24` and `quantization_mode` is unset, resolve to `nf4`; respect explicit override otherwise
     - _Requirements: 2.4_
 
-  - [~] 3.3 Write property test for default quantization mode
+  - [-] 3.3 Write property test for default quantization mode
     - **Property 5: Default Quantization_Mode for low VRAM**
     - **Validates: Requirements 2.4**
     - _Requirements: 2.4_
 
-  - [~] 3.4 Implement projected wall-clock, cost, and peak-VRAM estimation
+  - [-] 3.4 Implement projected wall-clock, cost, and peak-VRAM estimation
     - Pure functions for projected hours, projected cost = `gpu_hours * cost_rate_per_gpu_hour`, and projected peak VRAM per GPU using the same coefficients exposed by `Model_Selector`
     - Inputs: `Base_Model`, `Quantization_Mode`, `batch_size`, `sequence_length`, `gradient_accumulation_steps`, `gradient_checkpointing`
     - _Requirements: 2.5_
@@ -109,7 +109,7 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - For any over-limit configuration, applying the suggested knob change and rerunning `plan(...)` brings the projection at or below its limit
     - _Requirements: 2.6, 2.7, 2.8_
 
-  - [~] 3.7 Implement VRAM-sampling cadence helper used by `Training_Pipeline`
+  - [-] 3.7 Implement VRAM-sampling cadence helper used by `Training_Pipeline`
     - Helper that, given a step counter and a sampling policy, produces sample events at least once per 100 steps within any window of 100 consecutive steps
     - Records `(step, peak_vram_gb_per_gpu)` for the manifest
     - _Requirements: 2.10_
@@ -119,7 +119,7 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - **Validates: Requirements 2.10**
     - _Requirements: 2.10_
 
-  - [~] 3.9 Implement cost reconciliation
+  - [-] 3.9 Implement cost reconciliation
     - `reconcile_cost(pre_flight, actual_gpu_hours)` returning `actual_cost`, `absolute_diff`, `pct_diff`
     - Emitted at end-of-run when `Hardware_Profile.deployment == "cloud"`
     - _Requirements: 2.12_
@@ -140,11 +140,11 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - Each connector returns an iterable of raw records and a source identifier
     - _Requirements: 3.1_
 
-  - [~] 4.2 Write smoke tests for each source connector
+  - [-] 4.2 Write smoke tests for each source connector
     - One example test per source verifying interface availability and a small fixture round-trip
     - _Requirements: 3.1_
 
-  - [~] 4.3 Implement `Reasoning_Format` normalization and per-record validation
+  - [-] 4.3 Implement `Reasoning_Format` normalization and per-record validation
     - Normalize each raw record into `ReasoningRecord(problem, solution_steps, final_answer)`
     - Reject records with empty `problem`, empty/zero-length `solution_steps`, or empty `final_answer`; record reason counts
     - Preserve LaTeX delimiters and mathematical notation (no stripping)
@@ -161,7 +161,7 @@ Convert the feature design into a series of prompts for a code-generation LLM th
     - `len(input_records) == len(accepted_records) + sum(rejection_reasons.values())`
     - _Requirements: 3.3_
 
-  - [~] 4.6 Implement canonicalization and deduplication
+  - [-] 4.6 Implement canonicalization and deduplication
     - Default canonicalization: lowercase, trim, collapse whitespace, strip documented trailing punctuation
     - Function exposes `canonicalization_fn_id` and `canonicalization_fn_version` written into the dataset card
     - Deduplicate by canonicalized `problem`, recording the dedup count
@@ -215,7 +215,7 @@ Convert the feature design into a series of prompts for a code-generation LLM th
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 6. Implement `LoRA_Trainer`
-  - [~] 6.1 Implement `LoRA_Config` validation and field-level error reporting
+  - [-] 6.1 Implement `LoRA_Config` validation and field-level error reporting
     - Validate `r in [4, 128]`, `dropout in [0.0, 1.0]`, `bias in {none, all, lora_only}`, and that every entry in `target_modules` matches a real module name in the loaded base model
     - Raise `LoRAConfigInvalid` naming the offending field
     - _Requirements: 4.1, 4.2, 4.9_

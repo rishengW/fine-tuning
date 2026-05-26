@@ -6,4 +6,6 @@ with its resolved configuration and base model identity, and refuses to
 overwrite an existing Adapter at the same run-id path.
 """
 
-__all__: list[str] = []
+from math_lora.lora_trainer.validate import validate
+
+__all__ = ["validate"]
