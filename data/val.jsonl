@@ -1,0 +1,3 @@
+{"messages": [{"role": "user", "content": "Compute the indefinite integral of 4x^3."}, {"role": "assistant", "content": "Step 1: apply the power rule.\nStep 2: \u222b 4x^3 dx = 4 \u00b7 x^4/4 + C = x^4 + C.\nFinal answer: x^4 + C"}]}
+{"messages": [{"role": "user", "content": "Differentiate f(x) = ln(x)."}, {"role": "assistant", "content": "Step 1: recall d/dx[ln(x)] = 1/x for x > 0.\nFinal answer: f'(x) = 1/x"}]}
+{"messages": [{"role": "user", "content": "Evaluate \u222b_1^2 1/x dx."}, {"role": "assistant", "content": "Step 1: antiderivative of 1/x is ln(x) for x > 0.\nStep 2: ln(2) - ln(1) = ln(2) - 0 = ln(2).\nFinal answer: ln(2)"}]}

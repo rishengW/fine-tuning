@@ -5,55 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "math-lora"
 version = "0.1.0"
-description = "LoRA fine-tuning pipeline for mathematical reasoning on open-weight LLMs (Qwen, DeepSeek, Doubao)."
+description = "Minimal LoRA fine-tuning for mathematical reasoning."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "Apache-2.0" }
 authors = [{ name = "math-lora contributors" }]
-keywords = ["lora", "fine-tuning", "math", "reasoning", "transformers", "peft", "qlora"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
 
-# Pinned to known-good releases compatible with Python 3.10-3.12 and CUDA 12.x.
-# Versions are pinned with `==` for reproducibility per Requirement 8.9 (the
-# Experiment_Tracker pins resolved dependency versions in the Run_Manifest).
 dependencies = [
     "torch==2.4.1",
     "transformers==4.46.3",
     "peft==0.13.2",
-    "bitsandbytes==0.44.1",
     "accelerate==1.1.1",
     "datasets==3.1.0",
-    "tokenizers==0.20.3",
-    "sympy==1.13.3",
-    "pydantic==2.9.2",
-    "numpy==1.26.4",
-    "pyyaml==6.0.2",
-    "pyarrow==17.0.0",
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest==8.3.3",
-    "pytest-cov==5.0.0",
-    "hypothesis==6.115.5",
-]
-dev = [
-    "ruff==0.7.4",
-    "mypy==1.13.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/example/math-lora"
-Issues = "https://github.com/example/math-lora/issues"
+[project.scripts]
+math-lora-train = "math_lora.train:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -61,56 +28,3 @@ include = ["math_lora*"]
 
 [tool.setuptools.package-data]
 "math_lora" = ["py.typed"]
-
-# ---------------------------------------------------------------------------
-# pytest configuration
-# ---------------------------------------------------------------------------
-[tool.pytest.ini_options]
-minversion = "8.0"
-testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = [
-    "-ra",
-    "--strict-markers",
-    "--strict-config",
-    "--showlocals",
-]
-markers = [
-    "unit: example-based unit tests",
-    "property: hypothesis-driven property-based tests (>=100 examples per test)",
-    "integration: integration tests that may touch real models/disk/network",
-    "slow: tests that take noticeable wall-clock time",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning:google.*",
-    "ignore::DeprecationWarning:pkg_resources.*",
-]
-
-# ---------------------------------------------------------------------------
-# ruff configuration
-# ---------------------------------------------------------------------------
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-src = ["src", "tests"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]
-
-# ---------------------------------------------------------------------------
-# mypy configuration
-# ---------------------------------------------------------------------------
-[tool.mypy]
-python_version = "3.11"
-strict = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-mypy_path = "src"
-packages = ["math_lora"]
-plugins = ["pydantic.mypy"]

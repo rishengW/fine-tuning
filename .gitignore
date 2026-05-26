@@ -1,61 +1,20 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-.env
-.venv
-env/
+.venv/
 venv/
-ENV/
+env/
 
-# Test / coverage
+outputs/
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+
 .pytest_cache/
-.hypothesis/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-*.cover
-
-# Type checkers
 .mypy_cache/
-.pyre/
-.pytype/
 .ruff_cache/
 
-# IDE
-.idea/
 .vscode/
-*.swp
-
-# Project artifacts
-artifacts/
-runs/
-checkpoints/
-datasets/
-
-# OS
+.idea/
 .DS_Store
-Thumbs.db
