@@ -8,26 +8,28 @@ DatasetCard per source.
 
 Currently exposed:
 
-* **Source connector layer** (Requirement 3.1, task 4.1) --
-  :mod:`math_lora.dataset_builder.sources`.
-* **Canonicalization and deduplication** (Requirement 3.4, task 4.6) --
-  :mod:`math_lora.dataset_builder.canonicalization`. Reused by task 4.8
-  (validation split anti-leakage) and task 4.12 (Custom_Integral_Set
-  isolation), so any change to the canonicalization rule is a
-  cross-cutting change -- see that module's docstring for the
-  versioning policy.
+* **Source connectors** (Requirement 3.1, task 4.1): GSM8K, MATH, an
+  open-source step-by-step corpus, and operator-supplied integral pairs.
+* **Reasoning_Format normalization and per-record validation**
+  (Requirement 3.2, 3.3, 3.6, task 4.3): ``normalize_record`` and
+  ``normalize_records`` convert raw connector output into strict
+  :class:`~math_lora.types.ReasoningRecord` instances and count rejections
+  by reason.
 
-Later tasks will add normalization (4.3), splitting (4.8), truncation
-(4.10), exclusion (4.12), and dataset-card emission (4.14) on top of
-these primitives.
+Later tasks add deduplication (4.6), train/val splitting (4.8),
+tokenizer-aware truncation (4.10), Custom_Integral_Set exclusion (4.12),
+and dataset-card emission (4.14) on top of these pieces.
 """
 
-from math_lora.dataset_builder.canonicalization import (
-    CANONICALIZATION_FN_ID,
-    CANONICALIZATION_FN_VERSION,
-    TRAILING_PUNCTUATION,
-    canonicalize,
-    deduplicate,
+from math_lora.dataset_builder.normalization import (
+    ALL_REJECTION_REASONS,
+    REASON_EMPTY_FINAL_ANSWER,
+    REASON_EMPTY_PROBLEM,
+    REASON_EMPTY_SOLUTION_STEPS,
+    NormalizationResult,
+    RejectedRecord,
+    normalize_record,
+    normalize_records,
 )
 from math_lora.dataset_builder.sources import (
     DatasetSource,
@@ -40,11 +42,7 @@ from math_lora.dataset_builder.sources import (
 )
 
 __all__ = [
-    "CANONICALIZATION_FN_ID",
-    "CANONICALIZATION_FN_VERSION",
-    "TRAILING_PUNCTUATION",
-    "canonicalize",
-    "deduplicate",
+    # Source connectors (Requirement 3.1)
     "RawRecord",
     "DatasetSource",
     "GSM8KTrainSource",
@@ -52,4 +50,13 @@ __all__ = [
     "OpenStepByStepSource",
     "OperatorIntegralSource",
     "iter_sources",
+    # Normalization (Requirement 3.2, 3.3, 3.6)
+    "REASON_EMPTY_PROBLEM",
+    "REASON_EMPTY_SOLUTION_STEPS",
+    "REASON_EMPTY_FINAL_ANSWER",
+    "ALL_REJECTION_REASONS",
+    "RejectedRecord",
+    "NormalizationResult",
+    "normalize_record",
+    "normalize_records",
 ]

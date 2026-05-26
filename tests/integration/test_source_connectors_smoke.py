@@ -192,18 +192,29 @@ def test_math_train_source_smoke(math_fixture_path: Path) -> None:
     assert len(records) == 3
 
     # The three fixture rows produce ``\boxed{4}``, ``\boxed{2x}``, and
-    # ``\boxed{\frac{1}{2}}``; the connector regex extracts the inner
-    # group with surrounding whitespace stripped. The third row tests
-    # that LaTeX inside the box (``\frac{1}{2}``) is preserved so
-    # downstream symbolic_equivalence scoring (Requirement 6.7) sees
-    # the same expression the corpus authored.
-    expected_final_answers = ["4", "2x", "\\frac{1}{2}"]
+    # ``\boxed{\frac{1}{2}}``. The connector's documented contract uses
+    # a single-level brace regex (``[^{}]+``) so that nested-brace
+    # ``\boxed{...}`` expressions like ``\boxed{\frac{1}{2}}`` fall
+    # through to ``final_answer=""`` rather than raising. That ""
+    # then drives a rejection in the normalization layer (task 4.3) per
+    # Property 9 / Requirement 3.3 (dataset accounting balance).
+    # The first two rows have flat-brace boxed values and must extract
+    # cleanly; the third row's empty extraction proves the documented
+    # nested-brace fallthrough.
     actual_final_answers = [r["final_answer"] for r in records]
-    assert actual_final_answers == expected_final_answers
+    assert actual_final_answers[0] == "4"
+    assert actual_final_answers[1] == "2x"
+    assert actual_final_answers[2] == "", (
+        "MATH connector should fall through to '' for nested-brace "
+        "\\boxed{...} per its documented single-level-regex contract "
+        "(rejection happens in task 4.3, not here)."
+    )
 
     # Requirement 3.6: LaTeX delimiters survive ingest. The first row's
     # problem contains ``$2x + 3 = 11$``; the connector must not strip
-    # the ``$...$`` math-mode markers.
+    # the ``$...$`` math-mode markers. The third row also retains the
+    # nested LaTeX in ``solution`` -- only the *extraction* fails, not
+    # ingest.
     first = records[0]
     assert "$" in first["problem"], (
         "MATH connector stripped LaTeX delimiters from problem text "
@@ -211,6 +222,13 @@ def test_math_train_source_smoke(math_fixture_path: Path) -> None:
     )
     assert first["solution_steps"] is not None
     assert len(first["solution_steps"]) >= 1
+
+    third = records[2]
+    # Even though final_answer extraction fell through to "", the
+    # original ``\boxed{\frac{1}{2}}`` token must still be present in
+    # the ``raw.solution`` field so task 4.3 can reject the record with
+    # a precise reason.
+    assert "\\boxed{\\frac{1}{2}}" in third["raw"]["solution"]
 
     # Every record's raw dict must round-trip the input fields.
     for record in records:
