@@ -15,12 +15,28 @@ Currently exposed:
   ``normalize_records`` convert raw connector output into strict
   :class:`~math_lora.types.ReasoningRecord` instances and count rejections
   by reason.
+* **Canonicalization and deduplication** (Requirement 3.4, task 4.6):
+  ``canonicalize`` returns the documented canonical form of a problem
+  string, and ``deduplicate`` removes records sharing a canonical
+  ``problem`` key while reporting the dedup count. The matching
+  ``CANONICALIZATION_FN_ID`` / ``CANONICALIZATION_FN_VERSION`` constants
+  and the documented ``TRAILING_PUNCTUATION`` set are exported for
+  dataset-card emission (task 4.14) and reuse by the validation-split
+  anti-leakage check (task 4.8) and ``Custom_Integral_Set`` isolation
+  (task 4.12).
 
-Later tasks add deduplication (4.6), train/val splitting (4.8),
-tokenizer-aware truncation (4.10), Custom_Integral_Set exclusion (4.12),
-and dataset-card emission (4.14) on top of these pieces.
+Later tasks add train/val splitting (4.8), tokenizer-aware truncation
+(4.10), ``Custom_Integral_Set`` exclusion (4.12), and dataset-card
+emission (4.14) on top of these pieces.
 """
 
+from math_lora.dataset_builder.canonicalization import (
+    CANONICALIZATION_FN_ID,
+    CANONICALIZATION_FN_VERSION,
+    TRAILING_PUNCTUATION,
+    canonicalize,
+    deduplicate,
+)
 from math_lora.dataset_builder.normalization import (
     ALL_REJECTION_REASONS,
     REASON_EMPTY_FINAL_ANSWER,
@@ -59,4 +75,10 @@ __all__ = [
     "NormalizationResult",
     "normalize_record",
     "normalize_records",
+    # Canonicalization and deduplication (Requirement 3.4)
+    "CANONICALIZATION_FN_ID",
+    "CANONICALIZATION_FN_VERSION",
+    "TRAILING_PUNCTUATION",
+    "canonicalize",
+    "deduplicate",
 ]
