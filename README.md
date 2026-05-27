@@ -20,11 +20,48 @@ data/
 Requires Python 3.10-3.12. A CUDA-capable GPU is recommended for practical
 training speed; the code falls back to CPU/fp32 otherwise.
 
+### Windows (PowerShell)
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
 ```
+
+### Linux / macOS (bash or zsh)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+On a fresh Ubuntu/Debian box you may also need the Python venv package and
+build basics before the first `python3 -m venv`:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-venv python3-dev build-essential
+```
+
+For CUDA on Linux, install a `torch` wheel that matches your driver before
+`pip install -e .` if the default CPU/CUDA wheel from PyPI doesn't fit your
+setup. Example for CUDA 12.1:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu121 torch==2.4.1
+pip install -e .
+```
+
+Verify the GPU is visible to PyTorch:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+```
+
+> **Command syntax note.** The examples below use PowerShell's backtick
+> (`` ` ``) for line continuation. On Linux/macOS, replace each trailing
+> backtick with a backslash (`\`), or just put the whole command on one line.
 
 ## Data format
 
