@@ -120,7 +120,20 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    # Pick the best precision the current GPU supports:
+    # - Ampere+ (A10/A100/30xx/40xx): bf16 (native, numerically friendly).
+    # - Volta/Turing (V100/T4/20xx):  fp16 (bf16 is emulated on these and slow).
+    # - CPU:                          fp32.
+    use_cuda = torch.cuda.is_available()
+    use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
+    use_fp16 = use_cuda and not use_bf16
+    if use_bf16:
+        dtype = torch.bfloat16
+    elif use_fp16:
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+    print(f"[math-lora] precision: {dtype} (bf16={use_bf16}, fp16={use_fp16})")
     model = AutoModelForCausalLM.from_pretrained(
         cfg.base_model,
         torch_dtype=dtype,
@@ -169,7 +182,8 @@ def main() -> None:
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
-        bf16=torch.cuda.is_available(),
+        bf16=use_bf16,
+        fp16=use_fp16,
         report_to=[],
         seed=cfg.seed,
     )
