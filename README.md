@@ -85,6 +85,55 @@ GPU. Run `python -m math_lora.train --help` for the full flag list.
 The trained adapter and tokenizer are saved under `--output-dir` and can be
 loaded later with `peft.PeftModel.from_pretrained(base_model, output_dir)`.
 
+## Test before/after
+
+To check whether fine-tuning actually moved the needle, run the side-by-side
+comparison. It evaluates the base model alone, then the base model with the
+adapter attached, on a fixed prompt set covering GSM8K-style word problems,
+short calculus, and a couple of algebra items.
+
+```powershell
+# Run both passes and print a comparison table
+python -m math_lora.compare --adapter outputs/adapter
+```
+
+This writes `results/before.json` and `results/after.json` (full responses
+plus per-prompt correctness) and prints a summary like:
+
+```
+prompt          | expected       | before             | after              | Δ
+----------------+----------------+--------------------+--------------------+------
+gsm-apples      | 27             | 24                 | 27                 | +1
+gsm-train       | 160            | 160 miles          | 160                | =
+calc-int-power  | 2x^3 + C       | x^3 + C            | 2x^3 + C           | +1
+...
+before: 4/10 (40.0%)    after: 8/10 (80.0%)    delta: +40.0%
+flips: +5 better, -1 worse
+```
+
+You can also evaluate one model at a time with `math_lora.evaluate` (e.g.
+to log a baseline before training, then re-run with `--adapter` later):
+
+```powershell
+# Baseline (no adapter)
+python -m math_lora.evaluate --output results/before.json
+
+# After training
+python -m math_lora.evaluate --adapter outputs/adapter --output results/after.json
+
+# Compare two existing reports without re-running the model
+python -m math_lora.compare --report-only `
+    --before-report results/before.json `
+    --after-report  results/after.json
+```
+
+The prompt set lives in `src/math_lora/eval_prompts.py`. Each prompt has an
+expected final answer and optional aliases; the runner extracts the model's
+stated final answer (looking for `Final answer:`, `Answer:`, `\boxed{...}`,
+or the `#### ...` marker) and grades it with light normalization. The full
+generated response is stored in the JSON report for manual review when the
+auto-grade looks suspicious.
+
 ## Tuning notes for small models
 
 - **Diversity beats volume.** A few thousand varied examples generalize better

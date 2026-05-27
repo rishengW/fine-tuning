@@ -21,6 +21,8 @@ dependencies = [
 
 [project.scripts]
 math-lora-train = "math_lora.train:main"
+math-lora-eval = "math_lora.evaluate:main"
+math-lora-compare = "math_lora.compare:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
