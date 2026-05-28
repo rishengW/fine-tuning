@@ -1,0 +1,51 @@
+# 7B QLoRA configuration.
+#
+# This config is provided to demonstrate that the pipeline supports
+# real-scale QLoRA training. Running it requires:
+#   * a CUDA GPU with >=20 GB VRAM (e.g. RTX 3090/4090, A10, L4),
+#   * `bitsandbytes` installed and matching your CUDA toolkit,
+#   * sufficient disk for the base model (~15 GB).
+#
+# Compared to the 0.5B config we bump rank, lower the learning rate,
+# and use 4-bit base loading + bf16 compute (the QLoRA recipe).
+
+model:
+  base_model: Qwen/Qwen2.5-Math-7B-Instruct
+  trust_remote_code: true
+  load_in_4bit: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  train_file: data/train.jsonl
+  val_file: data/val.jsonl
+  max_seq_len: 2048
+
+training:
+  output_dir: outputs/qwen-7b-qlora
+  num_epochs: 1.0
+  per_device_batch_size: 1
+  grad_accum_steps: 16
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  logging_steps: 10
+  save_total_limit: 1
+  seed: 42
+
+tracking:
+  enabled: true
+  project: math-lora
+  run_name: qwen-7b-qlora
+  tags: [qwen, 7b, qlora, math]

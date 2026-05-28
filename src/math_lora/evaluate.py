@@ -1,31 +1,38 @@
-"""Evaluate the base model and/or a LoRA adapter on a fixed prompt set.
+"""Evaluation entry point.
 
-Usage examples (from the project root, with the venv activated):
+Loads a base model (and optionally a LoRA adapter), generates completions
+for either the curated :mod:`eval_prompts` set or the GSM8K test split,
+extracts the final answer, and reports exact-match accuracy.
 
-    # Run the base model only
+Two run modes:
+
+- ``curated`` (default): the small hand-written prompt set in
+  :mod:`math_lora.evaluation.eval_prompts`. Fast smoke check.
+- ``gsm8k``: the GSM8K test split. ``--limit`` controls sample count.
+
+Typical workflow::
+
+    # baseline (no adapter)
     python -m math_lora.evaluate \
         --base-model Qwen/Qwen2.5-0.5B-Instruct \
-        --output results/before.json
+        --suite gsm8k --limit 200 \
+        --report-out reports/baseline.json
 
-    # Run the base model + a trained adapter
+    # fine-tuned (with adapter)
     python -m math_lora.evaluate \
         --base-model Qwen/Qwen2.5-0.5B-Instruct \
         --adapter outputs/adapter \
-        --output results/after.json
+        --suite gsm8k --limit 200 \
+        --report-out reports/finetuned.json
 
-The prompt set lives in ``math_lora.eval_prompts``. Each prompt has a known
-final answer; the script extracts the model's stated final answer and
-compares it (case- and whitespace-normalized) against the expected string
-and any aliases. Full responses are written to the output JSON for manual
-review.
+The two reports are diffable; :mod:`scripts/diff_reports.py` (or the
+``make eval-diff`` target) prints the lift.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
-import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -34,282 +41,170 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .eval_prompts import EVAL_PROMPTS, EvalPrompt
+from math_lora.evaluation import EVAL_PROMPTS, EvalPrompt, extract_final_answer, is_match
+from math_lora.evaluation.gsm8k import GSM8KExample, load_gsm8k_test
+from math_lora.logging_utils import get_logger
+
+log = get_logger("math_lora.evaluate")
 
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# CLI
 # ---------------------------------------------------------------------------
-@dataclass
-class EvalConfig:
-    base_model: str
-    adapter: Path | None
-    output: Path
-    max_new_tokens: int
-    temperature: float
-    top_p: float
-    do_sample: bool
-    seed: int
-    label: str | None
-
-
-def parse_args() -> EvalConfig:
-    p = argparse.ArgumentParser(description="Evaluate a base model or LoRA adapter.")
-    p.add_argument("--base-model", default="Qwen/Qwen2.5-0.5B-Instruct")
-    p.add_argument(
-        "--adapter",
-        type=Path,
-        default=None,
-        help="Optional path to a trained LoRA adapter directory.",
-    )
-    p.add_argument(
-        "--output",
-        type=Path,
-        default=Path("results/eval.json"),
-        help="Where to write the JSON report.",
-    )
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run math-lora evaluation.")
+    p.add_argument("--base-model", required=True)
+    p.add_argument("--adapter", default=None, help="Path to a saved LoRA adapter.")
+    p.add_argument("--suite", choices=["curated", "gsm8k"], default="curated")
+    p.add_argument("--limit", type=int, default=None, help="Cap GSM8K samples.")
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--temperature", type=float, default=0.0)
-    p.add_argument("--top-p", type=float, default=1.0)
-    p.add_argument(
-        "--sample",
-        action="store_true",
-        help="Use sampling. Default is greedy decoding for reproducibility.",
-    )
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--label",
-        default=None,
-        help="Free-form label stored in the report (e.g. 'before' or 'after').",
-    )
-    args = p.parse_args()
-    return EvalConfig(
-        base_model=args.base_model,
-        adapter=args.adapter,
-        output=args.output,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        do_sample=args.sample,
-        seed=args.seed,
-        label=args.label,
-    )
+    p.add_argument("--report-out", type=Path, default=None)
+    p.add_argument("--device", default=None, help="Override device (default: auto).")
+    return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
-def pick_dtype() -> torch.dtype:
-    if not torch.cuda.is_available():
-        return torch.float32
-    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-
-def load_model(base_model: str, adapter: Path | None):
-    """Load tokenizer + model, optionally attaching a LoRA adapter."""
-    dtype = pick_dtype()
-    print(f"[eval] loading base model: {base_model} (dtype={dtype})")
+def load_model(base_model: str, adapter: str | None, device: str | None):
+    log.info("loading tokenizer + base model: %s", base_model)
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=dtype,
         trust_remote_code=True,
     )
+    if adapter:
+        from peft import PeftModel  # imported lazily so baseline runs without peft
 
-    if adapter is not None:
-        # Imported lazily so users running base-only eval don't need peft loaded.
-        from peft import PeftModel
+        log.info("attaching LoRA adapter: %s", adapter)
+        model = PeftModel.from_pretrained(model, adapter)
 
-        adapter = adapter.resolve()
-        if not adapter.exists():
-            raise FileNotFoundError(f"Adapter directory does not exist: {adapter}")
-        print(f"[eval] attaching LoRA adapter: {adapter}")
-        model = PeftModel.from_pretrained(model, str(adapter))
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
+    chosen = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(chosen)
     model.eval()
-    return tokenizer, model, device
+    return tokenizer, model, chosen
 
 
 # ---------------------------------------------------------------------------
-# Generation + answer extraction
+# Generation
 # ---------------------------------------------------------------------------
-_FINAL_ANSWER_PATTERNS = (
-    re.compile(r"final\s*answer\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"answer\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"\\boxed\{([^{}]+)\}"),
-    re.compile(r"####\s*(.+?)\s*$", re.MULTILINE),
-)
+@dataclass
+class EvalRecord:
+    id: str
+    category: str
+    question: str
+    expected_answer: str
+    response: str
+    extracted_answer: str
+    correct: bool
 
 
-def extract_final_answer(text: str) -> str:
-    """Pull a single-line 'final answer' out of a free-form response.
-
-    We try several common patterns in order: 'Final answer: ...', 'Answer: ...',
-    LaTeX ``\\boxed{...}``, and the GSM8K ``#### ...`` marker. If none match,
-    we fall back to the last non-empty line, which is usually a single number
-    or expression for short prompts.
-    """
-    for pattern in _FINAL_ANSWER_PATTERNS:
-        matches = pattern.findall(text)
-        if matches:
-            return matches[-1].strip().rstrip(".")
-    # Fallback: last non-empty line.
-    for line in reversed(text.strip().splitlines()):
-        line = line.strip()
-        if line:
-            return line.rstrip(".")
-    return ""
-
-
-def normalize(s: str) -> str:
-    """Loose normalization for answer comparison."""
-    s = s.strip().lower()
-    s = s.rstrip(".")
-    # Collapse whitespace.
-    s = re.sub(r"\s+", " ", s)
-    # Remove a trailing period or surrounding quotes.
-    s = s.strip("\"'")
-    # Strip a leading "$" for currency answers.
-    if s.startswith("$"):
-        s = s[1:].strip()
-    # Drop trailing units like "miles", "dollars" for very common cases so
-    # "160" matches "160 miles". This is intentionally narrow.
-    s = re.sub(
-        r"\s+(miles|dollars|cents|apples|years|years old)$",
-        "",
-        s,
-    )
-    # Equalize "*" and "^" for power notation.
-    s = s.replace("**", "^")
-    # Equalize spacing around equals signs.
-    s = re.sub(r"\s*=\s*", "=", s)
-    return s
-
-
-def is_correct(model_answer: str, prompt: EvalPrompt) -> bool:
-    candidates = (prompt.expected_answer, *prompt.answer_aliases)
-    norm_model = normalize(model_answer)
-    return any(normalize(c) == norm_model for c in candidates)
-
-
-def generate_one(
-    tokenizer,
-    model,
-    device: str,
-    prompt: EvalPrompt,
-    cfg: EvalConfig,
-) -> str:
-    messages = [{"role": "user", "content": prompt.question}]
+def generate(tokenizer, model, prompt: str, max_new_tokens: int, temperature: float, device: str) -> str:
+    messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+        messages, tokenize=False, add_generation_prompt=True
     )
     inputs = tokenizer(text, return_tensors="pt").to(device)
-
-    gen_kwargs: dict[str, Any] = {
-        "max_new_tokens": cfg.max_new_tokens,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-    if cfg.do_sample:
-        gen_kwargs.update(
-            do_sample=True,
-            temperature=cfg.temperature if cfg.temperature > 0 else 0.7,
-            top_p=cfg.top_p,
-        )
-    else:
-        gen_kwargs.update(do_sample=False)
-
+    do_sample = temperature > 0.0
     with torch.no_grad():
-        output = model.generate(**inputs, **gen_kwargs)
-    # Slice off the prompt tokens so we only decode the new completion.
-    new_tokens = output[0, inputs["input_ids"].shape[1] :]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            temperature=temperature if do_sample else 1.0,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    new_tokens = out[0][inputs["input_ids"].shape[1] :]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
+# ---------------------------------------------------------------------------
+# Suites
+# ---------------------------------------------------------------------------
+def _curated_records(prompts: tuple[EvalPrompt, ...]) -> list[tuple[str, str, str, tuple[str, ...], str]]:
+    return [
+        (p.id, p.category, p.question, p.answer_aliases, p.expected_answer) for p in prompts
+    ]
+
+
+def _gsm8k_records(examples: list[GSM8KExample]) -> list[tuple[str, str, str, tuple[str, ...], str]]:
+    return [(e.id, "gsm8k", e.question, (), e.expected_answer) for e in examples]
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def run_eval(cfg: EvalConfig) -> dict[str, Any]:
-    torch.manual_seed(cfg.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(cfg.seed)
+def main() -> None:
+    args = parse_args()
+    tokenizer, model, device = load_model(args.base_model, args.adapter, args.device)
 
-    tokenizer, model, device = load_model(cfg.base_model, cfg.adapter)
+    if args.suite == "curated":
+        rows = _curated_records(EVAL_PROMPTS)
+    else:
+        log.info("loading GSM8K test split (limit=%s)", args.limit)
+        rows = _gsm8k_records(load_gsm8k_test(limit=args.limit))
 
-    label = cfg.label or ("after" if cfg.adapter else "before")
-    results: list[dict[str, Any]] = []
-    correct = 0
-
-    print(f"[eval] running {len(EVAL_PROMPTS)} prompts (label={label})")
-    for i, prompt in enumerate(EVAL_PROMPTS, start=1):
-        t0 = time.perf_counter()
-        response = generate_one(tokenizer, model, device, prompt, cfg)
-        elapsed = time.perf_counter() - t0
+    log.info("running %d prompts", len(rows))
+    started = time.time()
+    records: list[EvalRecord] = []
+    for ex_id, category, question, aliases, expected in rows:
+        response = generate(
+            tokenizer,
+            model,
+            question,
+            args.max_new_tokens,
+            args.temperature,
+            device,
+        )
         extracted = extract_final_answer(response)
-        ok = is_correct(extracted, prompt)
-        if ok:
-            correct += 1
-        marker = "PASS" if ok else "FAIL"
-        print(
-            f"[eval] {i:>2}/{len(EVAL_PROMPTS)} [{marker}] {prompt.id} "
-            f"({elapsed:.1f}s) -> {extracted!r} (expected {prompt.expected_answer!r})"
-        )
-        results.append(
-            {
-                "id": prompt.id,
-                "category": prompt.category,
-                "question": prompt.question,
-                "expected_answer": prompt.expected_answer,
-                "answer_aliases": list(prompt.answer_aliases),
-                "model_response": response,
-                "model_final_answer": extracted,
-                "correct": ok,
-                "elapsed_seconds": round(elapsed, 3),
-            }
+        correct = is_match(extracted, expected, aliases)
+        records.append(
+            EvalRecord(
+                id=ex_id,
+                category=category,
+                question=question,
+                expected_answer=expected,
+                response=response,
+                extracted_answer=extracted,
+                correct=correct,
+            )
         )
 
-    total = len(EVAL_PROMPTS)
-    accuracy = correct / total if total else 0.0
-    summary = {
-        "label": label,
-        "base_model": cfg.base_model,
-        "adapter": str(cfg.adapter) if cfg.adapter else None,
-        "num_prompts": total,
-        "num_correct": correct,
-        "accuracy": round(accuracy, 4),
-        "decoding": {
-            "do_sample": cfg.do_sample,
-            "temperature": cfg.temperature,
-            "top_p": cfg.top_p,
-            "max_new_tokens": cfg.max_new_tokens,
-            "seed": cfg.seed,
-        },
-        "results": results,
+    elapsed = time.time() - started
+    correct = sum(1 for r in records if r.correct)
+    accuracy = correct / len(records) if records else 0.0
+
+    log.info(
+        "suite=%s n=%d correct=%d accuracy=%.4f elapsed=%.1fs",
+        args.suite,
+        len(records),
+        correct,
+        accuracy,
+        elapsed,
+    )
+
+    summary: dict[str, Any] = {
+        "suite": args.suite,
+        "base_model": args.base_model,
+        "adapter": args.adapter,
+        "n": len(records),
+        "correct": correct,
+        "accuracy": accuracy,
+        "elapsed_seconds": elapsed,
+        "records": [asdict(r) for r in records],
     }
 
-    cfg.output.parent.mkdir(parents=True, exist_ok=True)
-    cfg.output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(
-        f"[eval] {label}: {correct}/{total} correct ({accuracy:.1%})  "
-        f"-> {cfg.output}"
-    )
-    return summary
-
-
-def main() -> None:
-    cfg = parse_args()
-    try:
-        run_eval(cfg)
-    except FileNotFoundError as exc:
-        print(f"[eval] {exc}", file=sys.stderr)
-        sys.exit(2)
+    if args.report_out:
+        args.report_out.parent.mkdir(parents=True, exist_ok=True)
+        with args.report_out.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        log.info("report written: %s", args.report_out)
 
 
 if __name__ == "__main__":

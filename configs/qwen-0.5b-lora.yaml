@@ -1,0 +1,48 @@
+# Default development run.
+#
+# Targets a small, instruction-tuned Qwen base on consumer hardware.
+# A 0.5B model has limited capacity, so we keep rank low (8) and epochs
+# modest (2) to avoid overfitting on a few thousand training examples.
+
+model:
+  base_model: Qwen/Qwen2.5-0.5B-Instruct
+  trust_remote_code: true
+  load_in_4bit: false
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  # All linear projections - the QLoRA-style target set. Keep the list
+  # explicit so target-module changes are traceable in version control.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+data:
+  train_file: data/train.jsonl
+  val_file: data/val.jsonl
+  max_seq_len: 1024
+
+training:
+  output_dir: outputs/qwen-0.5b-lora
+  num_epochs: 2.0
+  per_device_batch_size: 1
+  grad_accum_steps: 8
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  lr_scheduler_type: cosine
+  logging_steps: 10
+  save_total_limit: 1
+  seed: 42
+
+tracking:
+  enabled: false
+  project: math-lora
+  run_name: qwen-0.5b-lora
+  tags: [qwen, 0.5b, lora]

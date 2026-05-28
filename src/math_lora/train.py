@@ -1,208 +1,231 @@
-"""Minimal LoRA fine-tuning script.
+"""LoRA fine-tuning entry point.
 
-Loads a base causal LM, applies a LoRA adapter via `peft`, trains on a JSONL
-dataset of chat-style examples, and saves the adapter to disk.
+Driven by a YAML config (see ``configs/*.yaml``) so that runs are
+reproducible and trackable, with optional CLI overrides for one-off
+tweaks. Supports plain LoRA (default) and 4-bit QLoRA (when
+``model.load_in_4bit=true``).
 
-Each line in the JSONL files is expected to look like:
+Each line of the input JSONL files is expected to look like::
 
     {"messages": [
         {"role": "user", "content": "..."},
         {"role": "assistant", "content": "..."}
     ]}
 
-Usage (from the project root, with the venv activated):
+Usage::
 
-    python -m math_lora.train \
-        --base-model Qwen/Qwen2.5-0.5B-Instruct \
-        --train-file data/train.jsonl \
-        --val-file data/val.jsonl \
-        --output-dir outputs/adapter
+    python -m math_lora.train --config configs/qwen-0.5b-lora.yaml
+    python -m math_lora.train --config configs/qwen-0.5b-lora.yaml \
+        --override training.num_epochs=1 --override lora.r=4
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 
+from math_lora.config import RunConfig
+from math_lora.logging_utils import WandbTracker, get_logger
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-@dataclass
-class TrainConfig:
-    base_model: str
-    train_file: Path
-    val_file: Path
-    output_dir: Path
-    max_seq_len: int
-    num_epochs: float
-    per_device_batch_size: int
-    grad_accum_steps: int
-    learning_rate: float
-    lora_r: int
-    lora_alpha: int
-    lora_dropout: float
-    seed: int
-
-
-def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Minimal LoRA fine-tuning runner.")
-    parser.add_argument("--base-model", default="Qwen/Qwen2.5-0.5B-Instruct")
-    parser.add_argument("--train-file", type=Path, default=Path("data/train.jsonl"))
-    parser.add_argument("--val-file", type=Path, default=Path("data/val.jsonl"))
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/adapter"))
-    parser.add_argument("--max-seq-len", type=int, default=1024)
-    parser.add_argument("--num-epochs", type=float, default=3.0)
-    parser.add_argument("--per-device-batch-size", type=int, default=1)
-    parser.add_argument("--grad-accum-steps", type=int, default=8)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
-    parser.add_argument("--lora-r", type=int, default=16)
-    parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-dropout", type=float, default=0.05)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-    return TrainConfig(**vars(args))
+log = get_logger("math_lora.train")
 
 
 # ---------------------------------------------------------------------------
-# Data loading
+# CLI
 # ---------------------------------------------------------------------------
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="LoRA fine-tuning for math reasoning.")
+    p.add_argument("--config", type=Path, required=True, help="Path to YAML config.")
+    p.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        help="Override config values, e.g. `--override training.num_epochs=1`.",
+    )
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def build_dataset(records: list[dict[str, Any]], tokenizer, max_seq_len: int) -> Dataset:
-    """Render chat messages with the tokenizer's chat template, then tokenize."""
-
+def _build_dataset(records: list[dict[str, Any]], tokenizer, max_seq_len: int) -> Dataset:
     def render(example: dict[str, Any]) -> dict[str, Any]:
         text = tokenizer.apply_chat_template(
-            example["messages"],
-            tokenize=False,
-            add_generation_prompt=False,
+            example["messages"], tokenize=False, add_generation_prompt=False
         )
-        tokenized = tokenizer(
-            text,
-            truncation=True,
-            max_length=max_seq_len,
-            padding=False,
-        )
+        tokenized = tokenizer(text, truncation=True, max_length=max_seq_len, padding=False)
         tokenized["labels"] = tokenized["input_ids"].copy()
         return tokenized
 
     ds = Dataset.from_list(records)
-    ds = ds.map(render, remove_columns=ds.column_names)
-    return ds
+    return ds.map(render, remove_columns=ds.column_names)
+
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+def _load_model(cfg: RunConfig):
+    log.info("loading tokenizer + base model: %s", cfg.model.base_model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        cfg.model.base_model,
+        revision=cfg.model.revision,
+        trust_remote_code=cfg.model.trust_remote_code,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_kwargs: dict[str, Any] = {
+        "trust_remote_code": cfg.model.trust_remote_code,
+    }
+    if cfg.model.revision:
+        model_kwargs["revision"] = cfg.model.revision
+
+    if cfg.model.load_in_4bit:
+        if not torch.cuda.is_available():
+            raise RuntimeError("load_in_4bit requires CUDA + bitsandbytes")
+        from transformers import BitsAndBytesConfig
+
+        log.info("using 4-bit nf4 quantization (QLoRA)")
+        bnb = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model_kwargs["quantization_config"] = bnb
+        model_kwargs["torch_dtype"] = torch.bfloat16
+    else:
+        model_kwargs["torch_dtype"] = (
+            torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        )
+
+    model = AutoModelForCausalLM.from_pretrained(cfg.model.base_model, **model_kwargs)
+
+    if cfg.model.load_in_4bit:
+        model = prepare_model_for_kbit_training(model)
+
+    log.info(
+        "applying LoRA: r=%d alpha=%d dropout=%.2f targets=%s",
+        cfg.lora.r,
+        cfg.lora.alpha,
+        cfg.lora.dropout,
+        cfg.lora.target_modules,
+    )
+    lora_config = LoraConfig(
+        r=cfg.lora.r,
+        lora_alpha=cfg.lora.alpha,
+        lora_dropout=cfg.lora.dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=cfg.lora.target_modules,
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+    return tokenizer, model
+
+
+# ---------------------------------------------------------------------------
+# Tracking glue: stream Trainer metrics into the WandbTracker.
+# ---------------------------------------------------------------------------
+class _WandbForwardCallback(TrainerCallback):
+    def __init__(self, tracker: WandbTracker) -> None:
+        self.tracker = tracker
+
+    def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001
+        if logs and self.tracker.enabled:
+            self.tracker.log({k: v for k, v in logs.items() if isinstance(v, (int, float))},
+                             step=state.global_step)
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    cfg = parse_args()
+    args = parse_args()
+    cfg = RunConfig.from_yaml(args.config).apply_overrides(args.override)
+    log.info("effective config:\n%s", cfg.model_dump_json(indent=2))
 
-    print(f"[math-lora] loading tokenizer + base model: {cfg.base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # Pick the best precision the current GPU supports:
-    # - Ampere+ (A10/A100/30xx/40xx): bf16 (native, numerically friendly).
-    # - Volta/Turing (V100/T4/20xx):  fp16 (bf16 is emulated on these and slow).
-    # - CPU:                          fp32.
-    use_cuda = torch.cuda.is_available()
-    use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
-    use_fp16 = use_cuda and not use_bf16
-    if use_bf16:
-        dtype = torch.bfloat16
-    elif use_fp16:
-        dtype = torch.float16
-    else:
-        dtype = torch.float32
-    print(f"[math-lora] precision: {dtype} (bf16={use_bf16}, fp16={use_fp16})")
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.base_model,
-        torch_dtype=dtype,
-        trust_remote_code=True,
+    tracker = WandbTracker(
+        enabled=cfg.tracking.enabled,
+        project=cfg.tracking.project,
+        run_name=cfg.tracking.run_name,
+        tags=cfg.tracking.tags,
+        config=cfg.model_dump(),
     )
 
-    print(f"[math-lora] applying LoRA: r={cfg.lora_r}, alpha={cfg.lora_alpha}")
-    lora_config = LoraConfig(
-        r=cfg.lora_r,
-        lora_alpha=cfg.lora_alpha,
-        lora_dropout=cfg.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    tokenizer, model = _load_model(cfg)
 
-    print(f"[math-lora] loading data: train={cfg.train_file}, val={cfg.val_file}")
-    train_records = load_jsonl(cfg.train_file)
-    val_records = load_jsonl(cfg.val_file)
-    train_ds = build_dataset(train_records, tokenizer, cfg.max_seq_len)
-    val_ds = build_dataset(val_records, tokenizer, cfg.max_seq_len)
+    log.info("loading data: train=%s val=%s", cfg.data.train_file, cfg.data.val_file)
+    train_records = _load_jsonl(cfg.data.train_file)
+    val_records = _load_jsonl(cfg.data.val_file)
+    train_ds = _build_dataset(train_records, tokenizer, cfg.data.max_seq_len)
+    val_ds = _build_dataset(val_records, tokenizer, cfg.data.max_seq_len)
+    log.info("train_examples=%d val_examples=%d", len(train_ds), len(val_ds))
 
-    collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    cfg.training.output_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg.output_dir.mkdir(parents=True, exist_ok=True)
     training_args = TrainingArguments(
-        output_dir=str(cfg.output_dir),
-        num_train_epochs=cfg.num_epochs,
-        per_device_train_batch_size=cfg.per_device_batch_size,
-        per_device_eval_batch_size=cfg.per_device_batch_size,
-        gradient_accumulation_steps=cfg.grad_accum_steps,
-        learning_rate=cfg.learning_rate,
-        warmup_ratio=0.03,
-        lr_scheduler_type="cosine",
-        logging_steps=1,
+        output_dir=str(cfg.training.output_dir),
+        num_train_epochs=cfg.training.num_epochs,
+        per_device_train_batch_size=cfg.training.per_device_batch_size,
+        per_device_eval_batch_size=cfg.training.per_device_batch_size,
+        gradient_accumulation_steps=cfg.training.grad_accum_steps,
+        learning_rate=cfg.training.learning_rate,
+        warmup_ratio=cfg.training.warmup_ratio,
+        lr_scheduler_type=cfg.training.lr_scheduler_type,
+        logging_steps=cfg.training.logging_steps,
         eval_strategy="epoch",
         save_strategy="epoch",
-        save_total_limit=1,
-        bf16=use_bf16,
-        fp16=use_fp16,
+        save_total_limit=cfg.training.save_total_limit,
+        bf16=torch.cuda.is_available(),
         report_to=[],
-        seed=cfg.seed,
+        seed=cfg.training.seed,
     )
+
+    callbacks = [_WandbForwardCallback(tracker)] if tracker.enabled else None
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        data_collator=collator,
+        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        callbacks=callbacks,
     )
 
-    print("[math-lora] starting training")
+    log.info("starting training")
     trainer.train()
 
-    print(f"[math-lora] saving adapter to {cfg.output_dir}")
-    model.save_pretrained(str(cfg.output_dir))
-    tokenizer.save_pretrained(str(cfg.output_dir))
-    print("[math-lora] done")
+    log.info("saving adapter to %s", cfg.training.output_dir)
+    model.save_pretrained(str(cfg.training.output_dir))
+    tokenizer.save_pretrained(str(cfg.training.output_dir))
+
+    # Persist the resolved config alongside the adapter for reproducibility.
+    (cfg.training.output_dir / "run_config.json").write_text(
+        cfg.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+    tracker.finish()
+    log.info("done")
 
 
 if __name__ == "__main__":
